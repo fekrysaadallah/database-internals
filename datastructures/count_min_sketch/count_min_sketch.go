@@ -5,9 +5,13 @@ import (
 	"hash/maphash"
 	"math"
 	"sort"
+	"sync"
 )
 
+var mergeMu sync.Mutex
+
 type CountMinSketch struct {
+	mu    sync.RWMutex
 	depth int
 	width int
 	seeds []maphash.Seed
@@ -58,6 +62,8 @@ func NewWithSeeds(depth int, width int, seeds []maphash.Seed) *CountMinSketch {
 }
 
 func (c *CountMinSketch) Insert(item string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for row := range c.depth {
 		hash := maphash.String(c.seeds[row], item)
 		column := hash % uint64(c.width)
@@ -65,13 +71,14 @@ func (c *CountMinSketch) Insert(item string) {
 	}
 }
 
-// TODO:
-// Thread Safe Version Of Insert
-func (c *CountMinSketch) InsertSafe(item string) {
+func (c *CountMinSketch) Count(item string) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
+	return c.count(item)
 }
 
-func (c *CountMinSketch) Count(item string) int {
+func (c *CountMinSketch) count(item string) int {
 	smallest := math.MaxInt
 
 	for row := range c.depth {
@@ -85,6 +92,9 @@ func (c *CountMinSketch) Count(item string) int {
 }
 
 func (c *CountMinSketch) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	for row := range c.depth {
 		for column := range c.width {
 			c.store[row][column] = 0
@@ -93,6 +103,17 @@ func (c *CountMinSketch) Clear() {
 }
 
 func (c *CountMinSketch) Merge(other *CountMinSketch) (*CountMinSketch, error) {
+	mergeMu.Lock()
+	defer mergeMu.Unlock()
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if other != c {
+		other.mu.RLock()
+		defer other.mu.RUnlock()
+	}
+
 	if c.depth != other.depth || c.width != other.width {
 		return nil, fmt.Errorf("cannot merge sketches with different dimensions")
 	}
@@ -114,7 +135,7 @@ func (c *CountMinSketch) Merge(other *CountMinSketch) (*CountMinSketch, error) {
 	return merged, nil
 }
 
-// Could use Quickselect to avoid sorting all candidates when k is small.
+// Quickselect Algorithm is more efficient than sorting the entire list if k is small
 func (c *CountMinSketch) TopK(k int, candidates []string) []string {
 	if k > len(candidates) || k <= 0 {
 		panic("k is out of bounds")
@@ -127,12 +148,14 @@ func (c *CountMinSketch) TopK(k int, candidates []string) []string {
 
 	entries := make([]entry, 0, len(candidates))
 
+	c.mu.RLock()
 	for _, item := range candidates {
 		entries = append(entries, entry{
 			item:  item,
-			count: c.Count(item),
+			count: c.count(item),
 		})
 	}
+	c.mu.RUnlock()
 
 	sort.Slice(entries, func(i, j int) bool {
 		// lexicographically sort if counts are equal
